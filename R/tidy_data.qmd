@@ -1,0 +1,618 @@
+---
+title: "Frailty progression following severe infections in adults ≥65 years in US and UK: two matched cohort studies"
+author: "Kwabena Asare"
+date: "`r lubridate::today()`"
+format: html
+execute: 
+  include: true
+  echo: false
+editor_options: 
+  chunk_output_type: console
+---
+
+## Purpose of project
+
+Tidy dataset
+ - Tidy data
+ - Create new variables
+ 
+# Minimal data management and tidying
+
+```{r data_tidy_1}
+
+# Survival: follow-up data
+# create censoring variable
+
+data <- data |>
+  mutate(censored_yr1 = if_else(survt_day > 0, 0,1),
+         censored_yr2 = if_else(survt_day > 365, 0,1),
+         censored_yr3 = if_else(survt_day > 365*2, 0,1),
+         censored_yr4 = if_else(survt_day > 365*3, 0,1),
+         censored_yr5 = if_else(survt_day > 365*4, 0,1)) 
+  
+# Age: at baseline
+# Age: at cohort exit
+
+data |> # check age categories
+  mutate(across(c(age_bl,ageout),
+                ~cut(.x,breaks=c(65,70,80,90,Inf),include.lowest=T,
+                     labels=c("65-70","71-80","81-90",">90")),
+                .names = "{.col}_cat4")) |>
+  group_by(age_bl_cat4) |>
+  #count(age_bl_cat4)
+  summarise(min=min(age_bl),max=max(age_bl)) |> 
+  mutate(across(where(is.numeric),~formatC(.x,format = "f",digits = 3)))
+
+data <- data |>  # create age categories
+  mutate(across(c(age_bl,ageout),
+                ~cut(.x,breaks=c(65,70,80,90,Inf),include.lowest=T,
+                     labels=c("65-70","71-80","81-90",">90")),
+                .names = "{.col}_cat4"),
+         .after = ageout) |>
+  mutate(across(c(age_bl,ageout),
+                ~cut(.x,breaks=c(65,70,80,Inf),include.lowest=T,
+                     labels=c("65-70","71-80",">80")),
+                .names = "{.col}_cat3")) 
+
+tabyl(data$age_bl_cat3)
+tabyl(data$age_bl_cat4)
+
+# Sex
+tabyl(data$sex)
+
+data |> # check/confirm sex categories
+  mutate(sex = factor(sex,labels = c("0"="Female","1"="Male"))) |>
+  count(sex)
+
+data <- data |> # create sex categories
+  mutate(sex = factor(sex,labels = c("0"="Female","1"="Male"))) 
+
+tabyl(data$sex)
+
+# race/ethnicity
+tabyl(data$race5_sr)
+tabyl(data$race7_sr)
+
+levels(factor(data$race7_sr))
+
+data <- data |>
+  mutate(across(c("race7_sr","race5_sr"),~str_replace(.x,"^[0-9]_",""))) |>
+  mutate(across(c("race7_sr","race5_sr"),~fct_inorder(factor(.x,exclude = "Miss")))) # make missing category NA
+
+# Rural/urban
+tabyl(data$urban)
+
+data<- data |>
+  mutate(urban = factor(urban,labels = c("0"="Rural","1"="Urban")))
+
+# area deprivation
+# cut into quintiles
+
+summary(data$adi)
+quantile(data$adi,probs = seq(0,1,0.20),na.rm = T)
+
+data<- data |>
+  mutate(adi_cat = cut(adi,breaks=quantile(data$adi,probs = seq(0,1,0.20),na.rm = T),include.lowest=T,
+               labels =c ("First","Second","Third","Fourth","Fifth")),
+         .after = adi)
+
+tabyl(data$adi_cat)
+attributes(data$adi_cat)
+
+# audit c
+summary(data$auditc)
+tabyl(data$auditc_cat)
+
+data <- data |>
+  mutate(auditc_cat = factor(auditc_cat,
+                             exclude="0_Miss", # make missing category NA
+                             labels = c("1_0"="Abstinent", "2_1-3"="Low-risk consumption",
+                                        "3_4-7"="At-risk consumption","4_8-12"="Hazardous/binge consumption")))
+# alcohol use disorder
+tabyl(data$cond_aud) 
+
+data<- data |> 
+  mutate(cond_aud = factor(cond_aud,labels = c("0"="no", "1"="yes")))
+
+# combine auditc and aud into alcohol use and use disorder variable: for use as covariate
+# classified patients into 5 mutually exclusive groups on the basis of AUDIT-C score and AUD diagnoses:
+
+# (1) abstinent without AUD (AUDIT-C score of 0 and absence of AUD diagnosis);
+
+# (2) abstinent with AUD (AUDIT-C score of 0 and presence of AUD diagnosis);
+
+# (3) lower-risk consumption (AUDIT-C score of 1-3 and absence of AUD diagnosis);
+
+# (4) moderate-risk consumption (AUDIT-C score of 4-7 and absence of AUD diagnosis); and
+
+# (5) high-risk consumption or AUD (AUDIT-C score of ≥8 or presence of AUD diagnosis with nonzero AUDIT-C score)”
+
+# this excludes/no category for auditc score of 7.5 and no aud
+
+summary(data$auditc)
+tabyl(data$auditc)
+summary(data$cond_aud)
+
+data<- data |> 
+  mutate(alcohol_use = case_when(auditc == 0 & cond_aud == "no" ~ factor("Abstinent without AUD"),
+                                 auditc == 0 & cond_aud == "yes" ~ factor("Abstinent with AUD"),
+                                 between(auditc,1,3)  & cond_aud == "no" ~ factor("Lower-risk consumption"),
+                                 between(auditc,4,7)  & cond_aud == "no" ~ factor("Moderate-risk consumption"),
+                                 between(auditc,8,Inf)  | (cond_aud == "yes" & auditc > 0) ~ factor("High-risk consumption")))
+
+tabyl(data$alcohol_use)
+
+data |>
+ filter(is.na(alcohol_use) & !is.na(auditc)) |> select(auditc,cond_aud)
+
+# smoking
+tabyl(data$smoke) 
+
+data <- data |> 
+  mutate(smoke = str_to_sentence(str_replace(smoke,"^[0-9]_",""))) |>
+  mutate(smoke = fct_inorder(factor(smoke,exclude = "Miss")))
+
+# CCI: Charlson Comorbidity Index
+
+summary(data$cci)
+tabyl(data$cci)
+attributes(data$charl_cancer)
+
+ggplot(data = data,
+       aes(factor(cci),fill = factor(inf))) + 
+  geom_bar(position = "fill") + labs(y="") + 
+  scale_y_continuous(labels = label_percent())
+
+data <- data |> 
+  mutate(cci_cat = factor(cci)) |> # levels preserved as is: this will be suitable for the regression
+  mutate(cci_cat3 = cut(cci,breaks = c(0,1,2,Inf),include.lowest=T,labels=c("0","1","2+")),.after = cci) |>
+  mutate(cci_cat4 = cut(cci,breaks = c(0,1,2,3,Inf),include.lowest=T,labels=c("0","1","2","3+")),.after = cci_cat4) |>
+  mutate(cci_cat7 = cut(cci,breaks = c(0,1,2,3,4,5,6,Inf),include.lowest=T,labels=c("0","1","2","3","4","5","6+")),.after = cci_cat4)
+
+tabyl(data$cci_cat)
+tabyl(data$cci_cat3)
+tabyl(data$cci_cat4)
+tabyl(data$cci_cat7)
+
+# frailty score = VACS Index 2.0 score 
+# these are the outcome variables
+
+# check missing frailty score
+
+data |>
+  select(matches("score_..$")) |>
+  map(~mean(is.na(.x))) |>
+  as_tibble()
+
+# plot percent missing frailty score
+
+data |>
+  select(matches("score_..$")) |>
+  map(~mean(is.na(.x))) |>
+  as_tibble() |>
+  pivot_longer(everything()) |>
+  ggplot(aes(fct_reorder(name,value),value)) + 
+  geom_col(fill="grey",color="darkred") + 
+  labs(x="",y="percentage missing (%)",
+       title = "Missing frailty score by year") +
+  scale_y_continuous(breaks = seq(0,1,0.1),limits=c(0,1),labels = label_percent())
+```
+
+## Tidy data 2: Severe infection exposure
+
+```{r data_tidy_2}
+
+# Severe Infections after age 65 years: this is the exposure variable
+
+tabyl(data$inf) # main exposure
+tabyl(data$inf_op_5y) # any outpatient infections: five years look back
+
+data <- data |> 
+  mutate(inf_icd = if_else(inf == 1, inf_icd,NA_character_)) |>
+  # some VA codes end with dot, remove
+  mutate(inf_icd = str_replace(inf_icd,"[.]$","")) 
+  
+# create infection type and site categories
+# extract the icd 10 study codes from the code list: with infection sub type categories: 
+infection_codelist_icd_10 <- infection_codelist |>
+  mutate(across(where(is.character),~str_trim(.x))) |>
+  select(`ICD-10 code`,bacterial:gastro) |>
+  mutate(`ICD-10 code` = str_replace(`ICD-10 code`,"[*]$","")) |> # starred codes have now been replaced with full set of codes
+  filter(!is.na(`ICD-10 code`)) |>
+  distinct(`ICD-10 code`,.keep_all = T) |>
+  rename(code = `ICD-10 code`) |>
+  as_tibble()
+
+# extract the icd 9 study codes from the code list: with infection sub type categories: 
+infection_codelist_icd_9 <- infection_codelist |>
+  mutate(across(where(is.character),~str_trim(.x))) |>
+  select(`ICD-9 code`,bacterial:gastro) |>
+  mutate(`ICD-9 code` = str_replace(`ICD-9 code`,"[*]$","")) |> 
+  filter(!is.na(`ICD-9 code`)) |>
+  distinct(`ICD-9 code`,.keep_all = T) |>
+  rename(code = `ICD-9 code`) |>
+  as_tibble()
+
+# left join main data set with the icd 9 and 10 code lists to import their categories
+                    
+data <- data |>
+  left_join(rbind(infection_codelist_icd_9,infection_codelist_icd_10),
+            join_by(inf_icd==code),suffix = c("","")) |> 
+  # create a variable to classify type of severe infection  (infection type is mutually exclusisve
+  # bacterial|funga|viral|parasitic
+  mutate(inf_type = case_when(bacterial == 1 ~ factor("bacterial"),
+                              viral == 1 ~ factor("viral"),
+                              fungal == 1 ~ factor("fungal"),
+                              parasitic == 1 ~ factor("parasitic")),.after = inf) |>
+  #infection site
+  mutate(inf_site = case_when(sepsis == 1 ~ factor("sepsis"),
+                              uti == 1 ~ factor("uti"),
+                              ssti == 1 ~ factor("ssti"),
+                              mening_enceph == 1 ~ factor("mening_enceph"),
+                              lrti == 1 ~ factor("lrti"),
+                              gastro == 1 ~ factor("gastro")),.after = inf_type)
+
+# check inf_type distribution
+data |>
+  filter(inf==1) |>
+  tabyl(inf_type) #
+
+data |>
+  filter(inf==1) |>
+  tabyl(inf_site)
+
+# create another variable to identify the infection type of the exposed in a matched group: 
+data <- data |> 
+  group_by(matchnum) |> 
+  mutate(inf_type_of_match_grp = if_else(inf==1,inf_type,NA_character_),.after = inf_type) |>
+  mutate(inf_site_of_match_grp = if_else(inf==1,inf_site,NA_character_),.after = inf_site) |>
+  fill(inf_type_of_match_grp,.direction = "downup") |>
+  fill(inf_site_of_match_grp,.direction = "downup") |>
+  ungroup()
+
+# some VA icd codes are not infections, remove: they are not on our infection codelist
+# for example U07.0 is vaping
+not_infection <- data |> filter(!inf_icd %in% c(infection_codelist_icd_9$code,infection_codelist_icd_10$code)) |> pull(inf_icd) |> unique() |> sort()
+not_infection
+
+# check the descriptions
+not_infection_desc <- data.frame(icd=data |> filter(!inf_icd %in% c(infection_codelist_icd_9$code,infection_codelist_icd_10$code)) |> pull(inf_icd) |> unique() |> sort()) |>
+  left_join(va_all_codes,
+            join_by(icd==ICDCode))
+```
+
+```{r flow_chart,include=FALSE,eval=FALSE}
+
+## create study flow chart
+
+f_chart_all <- nrow(data)
+
+# number not matched
+# include those not infections (and their matched counterparts) as not matched
+f_chart_not_matched <- data |>
+  group_by(matchnum) |>
+  filter(any(inf_icd %in% not_infection & inf==1) | !matchcount %in% c(1:5)) |>
+  ungroup() |>
+  nrow()
+
+# number matched
+f_chart_matched <- data |>
+  group_by(matchnum) |>
+  filter(matchcount %in% c(1:5),any(!inf_icd %in% not_infection & inf==1)) |>
+  ungroup() |>
+  tabyl(inf) |>
+  adorn_totals()
+
+# confirm matched + unmatched == study population
+ f_chart_matched[3,2]+f_chart_not_matched==f_chart_all
+
+# For those matched
+ # no VACS Index: baseline to Year 5
+f_chart_no_VACS_bl_to_yr5 <- data |>
+  group_by(matchnum) |>
+  filter(matchcount %in% c(1:5),any(!inf_icd %in% not_infection & inf==1)) |>
+  ungroup() |>
+  filter(if_all(matches("^score_(bl|[1-5]y)$"),~is.na(.x))) |>
+  nrow()
+
+ # no VACS Index: Year 1-5
+f_chart_no_VACS_yr1_to_yr5 <- data |>
+  group_by(matchnum) |>
+  filter(matchcount %in% c(1:5),any(!inf_icd %in% not_infection & inf==1)) |>
+  ungroup() |>
+  filter(!is.na(score_bl),if_all(matches("^score_[1-5]y$"),~is.na(.x))) |>
+  nrow()
+
+# final sample: main analysis
+# baseline VACS Index not missing and at least one follow-up VACS Index not missing
+f_chart_main_analysis <- data |>
+  group_by(matchnum) |>
+  filter(matchcount %in% c(1:5),any(!inf_icd %in% not_infection & inf==1)) |>
+  ungroup() |>
+  filter(!is.na(score_bl),if_any(matches("^score_[1-5]y$"),~!is.na(.x))) |>
+  tabyl(inf) |>
+  adorn_totals()
+
+# those with imputed baseline VACS for sensitivity analysis
+f_chart_sensitivity_analysis <- data |>
+  group_by(matchnum) |>
+  filter(matchcount %in% c(1:5),any(!inf_icd %in% not_infection & inf==1)) |>
+  ungroup() |>
+  filter(is.na(score_bl),if_any(matches("^score_[1-5]y$"),~!is.na(.x))) |>
+  tabyl(inf) |>
+  adorn_totals()
+
+# confirm those missing plus those in main analysis plus those added for sensitivity analysis == total matched
+
+f_chart_no_VACS_bl_to_yr5+f_chart_no_VACS_yr1_to_yr5+f_chart_sensitivity_analysis[3,2]+f_chart_main_analysis[3,2]==f_chart_matched[3,2]
+
+# final cohort
+f_chart_sensitivity_analysis[3,2]+f_chart_main_analysis[3,2]
+
+# Infection type and site
+#
+data |>
+  group_by(matchnum) |>
+  filter(matchcount %in% c(1:5),any(!inf_icd %in% not_infection & inf==1),inf==1) |>
+  ungroup() |>
+  filter(!is.na(score_bl),if_any(matches("^score_[1-5]y$"),~!is.na(.x))) |>
+  tabyl(inf_type) |>
+  adorn_totals()
+#
+data |>
+  group_by(matchnum) |>
+  filter(matchcount %in% c(1:5),any(!inf_icd %in% not_infection & inf==1),inf==1) |>
+  ungroup() |>
+  filter(!is.na(score_bl),if_any(matches("^score_[1-5]y$"),~!is.na(.x))) |>
+  tabyl(inf_site) |>
+  adorn_totals()
+```
+
+```{r remove_unmatched_and_notinfections}
+
+# remove unmatched and not infections
+data <- data |> 
+  group_by(matchnum) |> 
+  filter(any(!inf_icd %in% not_infection & inf == 1)) |> 
+  ungroup() |>
+  filter(matchcount %in% c(1:5)) 
+```
+
+
+## Tidy 3: Calculate VACS Index 2.0; to add HIV RNA and CD4
+
+To include CD4 and log-VL (set to normal values 1000 and 1.3 for all)
+
+Variables
+
+**10 VACS components**
+
+1. **AGE**
+2. **BMI**
+3. **ALBUMIN**
+4. **HEMOGLOBIN**
+5. **WHITE BLOOD CELL COUNT**
+6. **LIVER FIBROSIS 4 (AST, ALT, PLATELETS)**
+7. **ESTIMATED GLOMERULAR FILTRATION RATE (CREATININE, AGE, SEX, RACE)**
+8. **CD4** 
+9. **VIRAL LOAD** 
+10. **HEPATITIS C**
+
+1. If **creatinine** is the only lab missing (**excluding VL, CD4 which is excluded for all**) set EGFR to 90.
+  - All other components must be complete
+
+  - **Normal values**
+  - Normal values are
+    - ALT = 25 **(for FIB-4 calc)**
+    - AST = 25 **(for FIB-4 calc)**
+    - ALB = 4
+    - HGB = 14
+    - PLT = 200 **(for FIB-4 calc)**
+    - WBC = 5.5
+    - BMI = 25
+    - EGFR = 90 if creatinine only lab missing.
+    - VL (log) = 1.3 for all irrespective of HIV status: **initial score does not include VL and CD4**
+    - CD4 = 1000 for all irrespective of HIV status:
+
+2. Transform continuous components as:
+ -  _T = Trimmed to remove extreme values
+ -  _C = centered (xi - mean(x)): This is important to do for a polynomial model to avoid collinearity.
+ - _SQ = Squared version
+ - _CU = Cubed version
+ 
+3. Calculate score of each transformed VACS Index component as follows: Using weights from the VACS model
+ 
+ 1. **Age** : (AGE_C *	0.05593) + (AGE_CSQ *	-0.00447) + (AGE_CCU *	0.00518)
+ 2. **CD4 count** = (CD4_C *	-0.05608) + (CD4_CSQ *	-0.15344) + (CD4_CCU *	0.02352) : 
+ 3. **HIV Viral load** = (VL_C *	0.51329) + (VL_CSQ *	-0.42235) + (VL_CCU *	0.09798) : 
+ 4. **Hemoglobin** = (HGB_C *	-0.13364) + (HGB_CSQ *	0.02601) + (HGB_CCU *	0.00456)
+ 5. **Fibrosis-4 (FIB-4), Calculated with AST, ALT and platelet count** = (FIB4_C *	0.22045) + (FIB4_CSQ *	-0.00875);
+ 6. **Estimated glomerular filtration rate** = (EGFRX1 *	-0.03075) + (EGFRX2 *	-0.07668) + (EGFRX3 *	0.10629) + (EGFRX4 *	0.1325)
+  
+  - If creatinine is the only lab missing, set EGFR = 90; then:
+  
+  - EGFRX1 = EGFR_T/10
+  - EGFRX2 = if EGFR > 35 then EGFRX2 = (EGFR_T-35)/10; else EGFRX2 = 0
+  - EGFRX3 = if EGFR > 65 then EGFRX3 = (EGFR_T-65)/10; else EGFRX3 = 0
+  - EGFRX4 = if EGFR > 115 then EGFRX4 = (EGFR_T-115)/10; else EGFRX4 = 0
+  
+ 7. **Hepatitis C co-infection** = (COND_HCV *	0.34201);
+ 8. **Albumin** = (ALB_C *	-0.44289) + (ALB_CSQ *	0.10394) + (ALB_CCU *	0.02766);
+ 9. **BMI** = (BMI_C *	-0.05452) + (BMI_CSQ *	0.00359);
+ 10. **WBC count** = (WBC_C *	0.1257) + (WBC_CSQ *	0.01985) + (WBC_CCU *	-0.00438);
+
+4. Calculate VACS Index by summing all estimates in bullet 3, CALC_XB: 
+
+5. Normalize VACS Index to 0 to 100 scale
+
+ - RANGE = 2.10 - (-3.25); -3.25 is the actual minimum, 2.10 is min for 10th decile, also 97.5%*
+ - DIST = CALC_XB - (-3.25); 
+ - SCORE (VACS Index) = (DIST / RANGE)*100
+
+```{r generate_VACS_index_function}
+
+generate_VACS_index <- function(data=data,year){ # year = c("bl", "1y", "2y", "3y", "4y", "5y")
+  data |>
+    # select VACS components
+    select(matches(glue("^(score)_{year}_(age|lab_alb|lab_alt|lab_ast|lab_creat|lab_hgb|fib4|lab_plt|lab_wbc|bmi|egfr|cond_hcv)$"))
+           ) |> 
+    # set all CD4 to 1000 and all VL to 1.3 for all individuals years or timepoints
+    mutate(score_lab_cd4 = 1000,score_lab_vllog = 1.3) |>
+    # Create an indicator to identify which only lab missing
+    mutate(VCAAACHPWB =  paste0(as.numeric(!is.na(score_lab_cd4)),
+                                as.numeric(!is.na(score_lab_vllog)),
+                                as.numeric(!is.na(glue("score_{year}_lab_alb"))),
+                                as.numeric(!is.na(glue("score_{year}_lab_alt"))),
+                                as.numeric(!is.na(glue("score_{year}_lab_ast"))),
+                                as.numeric(!is.na(glue("score_{year}_lab_creat"))),
+                                as.numeric(!is.na(glue("score_{year}_lab_hgb"))),
+                                as.numeric(!is.na(glue("score_{year}_lab_plt"))),
+                                as.numeric(!is.na(glue("score_{year}_lab_wbc"))),
+                                as.numeric(!is.na(glue("score_{year}_bmi"))))) |> 
+    # Impute missing values if missing only one lab:
+    mutate(across(matches("^score_.._lab_alb$"), ~if_else(VCAAACHPWB == "1101111111",4,.x)),
+           across(matches("^score_.._lab_alt$"), ~if_else(VCAAACHPWB == "1101111111",25,.x)),
+           across(matches("^score_.._lab_ast$"), ~if_else(VCAAACHPWB == "1101111111",25,.x)),
+           across(matches("^score_.._lab_hgb$"), ~if_else(VCAAACHPWB == "1101111111",14,.x)),
+           across(matches("^score_.._lab_plt$"), ~if_else(VCAAACHPWB == "1101111111",200,.x)),
+           across(matches("^score_.._lab_wbc$"), ~if_else(VCAAACHPWB == "1101111111",5.5,.x)),
+           across(matches("^score_.._bmi$"), ~if_else(VCAAACHPWB == "1101111111",25,.x))) |>
+    # Trim continuous components (the 10 VACS components)
+    mutate(across(matches("^score_.._age$"),~case_when(.x < 30 ~ 30,.x > 75 ~ 75,.default = .x)),
+           across(matches("^score_.._lab_hgb$"),~case_when(.x < 9 ~ 9,.x > 15 ~ 16,.default = .x)),
+           across(matches("^score_.._fib4$"),~case_when(.x < 0.5 ~ 0.5,.x > 7.5 ~ 7.5,.default = .x)),
+           across(matches("^score_.._lab_alb$"),~case_when(.x < 2 ~ 2,.x > 5 ~ 5,.default = .x)),
+           across(matches("^score_.._bmi$"),~case_when(.x < 15 ~ 15,.x > 35 ~ 35,.default = .x)),
+           across(matches("^score_.._lab_wbc$"),~case_when(.x < 2.5 ~ 2.5,.x > 11 ~ 11,.default = .x))) |>
+    # Trim continuous EGFR: if creatinine is only lab missing then set EGFR to normal
+    mutate(across(matches("^score_.._egfr$"), ~case_when(VCAAACHPWB == "1111101111" ~ 90,.default = .x))) |>
+    mutate(across(matches("^score_.._egfr$"), ~case_when(.x > 180 ~ 180,.default = .x),.names = "{.col}_T")) |>
+    mutate(across(matches("^score_.._egfr$"),list(~.x/10,
+                                                  ~if_else(.x > 35,(get(glue("score_{year}_egfr_T"))-35)/10,0),
+                                                  ~if_else(.x > 65, (get(glue("score_{year}_egfr_T"))-65)/10,0),
+                                                  ~if_else(.x > 115, (get(glue("score_{year}_egfr_T"))-115)/10,0)))) |> # this creates score_bl_egfr_1 ,score_bl_egfr_2 ,score_bl_egfr_3 ,score_bl_egfr_4 
+    # Center continuous VACS components: except egfr and fib4
+    mutate(across(matches("^score_.._age$"), ~ (.x-50)/5)) |>
+    mutate(across(matches("^score_lab_cd4$"), ~log(1000-.x+0.1))) |>
+    mutate(across(matches("^score_lab_vllog$"),~.x - 2)) |>
+    mutate(across(matches("^score_.._lab_hgb$"), ~.x - 14)) |>
+    mutate(across(matches("^score_.._lab_alb$"), ~.x-4)) |>
+    mutate(across(matches("^score_.._bmi$"), ~.x-25)) |>
+    mutate(across(matches("^score_.._lab_wbc$"), ~.x-5.5)) |>
+    # square and cube all centered variables
+    mutate(across(matches(glue("^(score)(_{year})?_(age|lab_cd4|lab_vllog|lab_alb|lab_hgb|fib4|bmi|lab_wbc)$")),
+                  list(sqr = ~.x^2,cub = ~.x^3),.names = "{.col}_{.fn}")) |> 
+    # Calculate VACS Index
+    mutate(vacs_score = 
+             (get(glue("score_{year}_age"))*0.05593)+(get(glue("score_{year}_age_sqr"))*-0.00447)+(get(glue("score_{year}_age_cub"))*0.00518)+
+             (get(glue("score_lab_cd4"))*-0.05608)+(get(glue("score_lab_cd4_sqr"))*-0.15344) +(get(glue("score_lab_cd4_cub"))*0.02352)+
+             (get(glue("score_lab_vllog"))*0.51329)+(get(glue("score_lab_vllog_sqr"))*-0.42235)+(get(glue("score_lab_vllog_cub"))*0.09798)+
+             (get(glue("score_{year}_lab_alb"))*-0.44289)+(get(glue("score_{year}_lab_alb_sqr"))*0.10394)+(get(glue("score_{year}_lab_alb_cub"))*0.02766)+
+             (get(glue("score_{year}_lab_hgb"))*-0.13364)+(get(glue("score_{year}_lab_hgb_sqr"))*0.02601)+(get(glue("score_{year}_lab_hgb_cub"))*0.00456)+
+             (get(glue("score_{year}_fib4"))*0.22045)+(get(glue("score_{year}_fib4_sqr"))*-0.00875)+
+             (get(glue("score_{year}_egfr_1"))*-0.03075)+(get(glue("score_{year}_egfr_2"))*-0.07668)+(get(glue("score_{year}_egfr_3"))*0.10629)+(get(glue("score_{year}_egfr_4"))*0.1325)+
+             (get(glue("score_{year}_cond_hcv"))*0.34201)+
+             (get(glue("score_{year}_bmi"))*-0.05452)+(get(glue("score_{year}_bmi_sqr"))*0.00359)+
+             (get(glue("score_{year}_lab_wbc"))*0.1257)+(get(glue("score_{year}_lab_wbc_sqr"))*0.01985)+(get(glue("score_{year}_lab_wbc_cub"))*-0.00438)) |>
+    # normalize VACS Index : 0 to 100 scale: SCORE = (DIST / RANGE)*100;
+    mutate(distance = vacs_score - (-3.25), range = 2.10 - (-3.25)) |>
+    mutate(vacs_score_normalised = (distance/range)*100) |> pull(vacs_score_normalised)
+}
+  
+```
+
+
+```{r generate_VACS_index}
+
+ data <- data |>
+  # Create tag to indicate which VACS component is missing
+  mutate(score_bl_lab_cd4_T = 1000,score_bl_lab_vllog_T = 1.3) |>
+  mutate(VCAAACHPWB =  paste0(as.numeric(!is.na(score_bl_lab_vllog_T)),
+                              as.numeric(!is.na(score_bl_lab_cd4_T)),
+                              as.numeric(!is.na(score_bl_lab_alb)),
+                              as.numeric(!is.na(score_bl_lab_alt)),
+                              as.numeric(!is.na(score_bl_lab_ast)),
+                              as.numeric(!is.na(score_bl_lab_creat)),
+                              as.numeric(!is.na(score_bl_lab_hgb)),
+                              as.numeric(!is.na(score_bl_lab_plt)),
+                              as.numeric(!is.na(score_bl_lab_wbc)),
+                              as.numeric(!is.na(score_bl_bmi)))) |> 
+  mutate(score_bl = generate_VACS_index(year="bl"),
+         score_1y = generate_VACS_index(year="1y"),
+         score_2y = generate_VACS_index(year="2y"),
+         score_3y = generate_VACS_index(year="3y"),
+         score_4y = generate_VACS_index(year="4y"),
+         score_5y = generate_VACS_index(year="5y")) |>
+  set_USriable_labels(score_bl = "VACS Index (baseline)",
+                      score_1y = "VACS Index (yr 1)",
+                      score_2y = "VACS Index (yr 2)",
+                      score_3y = "VACS Index (yr 3)",
+                      score_4y = "VACS Index (yr 4)",
+                      score_5y = "VACS Index (yr 5)")
+# Note, have overwritten all vacs score that came with the data as were created without CD4 and VL
+
+
+```
+
+## Tidy 4: Set variable labels
+```{r data_tidy_3}
+
+# assign variable labels as attributes
+
+data <- data |>
+set_USriable_labels(
+race7_sr = "Race or ethinicty",
+race5_sr = "Race or ethinicty",
+sex = "Sex",
+inf = "Severe infection after age 65",
+inf_type = "infection_type",
+inf_site = "infection_site",
+inf_type_of_match_grp = "infection_type",
+inf_site_of_match_grp = "infection_site",
+yr_inf = "Year of Severe infection after age 65",
+survt_day = "Total follow-up days",
+survt_yr = "Total follow-up years",
+smoke = "Smoking status",
+urban = "Area of residence",
+adi = "Area Deprivation Index",
+adi_cat = "Area Deprivation Index (quintiles)",
+auditc = "AUDIT-C",
+auditc_cat = "AUDIT-C",
+alcohol_use = "Alcohol use",
+cci = "Charlson comorbidity Index",
+cci_cat3 = "Charlson comorbidity Index",
+cci_cat4 = "Charlson comorbidity Index",
+cci_cat7 = "Charlson comorbidity Index",
+charl_mi = "Myocardial infarction",
+charl_chf = "Congestive heart failure",
+charl_pvd = "Peripheral vascular disease",
+charl_cevd = "Cerebrovascular disease",
+charl_dem = "Dementia",
+charl_copd = "Chronic Obstructive Pulmonary Disease",
+charl_rheum = "Rheumatologic disease",
+charl_pud = "Peptic ulcer disease",
+charl_mildld = "Mild liver disease",
+charl_diab_nc = "Diabetes mellitus (not complicated)",
+charl_diab_c = "Diabetes mellitus (complicated)",
+charl_para = "Paralelgia or Hemiplegia",
+charl_cancer = "Cancer",
+charl_msld = "Moderate or severe liver disease",
+charl_mets = "Metastatic solid tumor",
+charl_hiv = "HIV",
+charl_rd = "Renal disease",
+cond_aud = "Alcohol use disorder (AUD)",
+score_bl = "VACS Index (baseline)",
+score_1y = "VACS Index (yr 1)",
+score_2y = "VACS Index (yr 2)",
+score_3y = "VACS Index (yr 3)",
+score_4y = "VACS Index (yr 4)",
+score_5y = "VACS Index (yr 5)",
+auditc_cat = "AUDITC",
+inf_op_5y = "Any outpatient infection (5-year lookback)",
+inf_op_ever = "Any infection (outpatient recorded) ever before baseline",
+age_bl = "Age, years",
+age_bl_cat3 = "Age, years",
+age_bl_cat4 = "Age, years")
+```
+
+

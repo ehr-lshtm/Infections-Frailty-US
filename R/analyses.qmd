@@ -1,0 +1,775 @@
+---
+title: "Frailty progression following severe infections in adults ≥65 years in US and UK: two matched cohort studies"
+author: "Kwabena Asare"
+date: "`r lubridate::today()`"
+format: html
+execute: 
+  include: true
+  echo: false
+  eval: false
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# Main Analyses
+
+Main analysis sample: **Individuals with a baseline and at least one follow-up VACS Index score available/not missing**: 
+
+## Descriptive analysis
+
+**Table 1.** Descriptive summaries of **baseline** variables by severe infection (exposure) status.
+**Table 2.** Descriptive summaries of **follow-up** frailty score by severe infection (exposure) status.
+
+```{r table_one_main}
+
+# baseline variables by exposure status
+
+table_one_main <- inf_frailty_us |>
+  filter(!is.na(score_bl),
+         if_any(matches("^score_[1-5]y$"),~!is.na(.x))) |>
+    mutate(inf=if_else(inf==0,"no","yes"),
+         charl_diab = if_else(charl_diab_c == 1 | charl_diab_nc ==1, 1,0),
+         across(where(is.factor),~fct_na_uslue_to_level(.x,"Missing"))) |>
+  select(inf,age_bl,age_bl_cat4,sex,race5_sr,urban,
+         adi_cat,alcohol_use,smoke,cci_cat4,matches("charl_"),
+         antimic,inf_op_5y,inf_op_7d_1op,score_bl) |> 
+    mutate(charl_diab_c=NULL,charl_diab_nc=NULL) |>
+  tbl_summary(by="inf",missing_text = "Missing",
+              type=list(c(score_bl,age_bl) ~ "continuous2"),
+              statistic = list(all_continuous2()~ c("{mean} ({sd})","{median} ({p25}, {p75})","{min} - {max}")),
+              digits = list(all_continuous() ~ 0)) |>
+  bold_labels() |>
+  modify_footnote(everything() ~ NA) |>
+  modify_spanning_header(all_stat_cols() ~ "Severe infection after age 65 years") |>
+  modify_caption(glue("**Table** Characteristics of participants at index date (N = {nrow(inf_frailty_us|>filter(!is.na(score_bl),
+         if_any(c(score_1y,score_2y,score_3y,score_4y,score_5y),~!is.na(.x)))) |> prettyNum(',')})")) 
+
+table_one_main
+
+```
+
+```{r table_two_main}
+# follow-up frailty score by exposure status
+table_two_main <- inf_frailty_us |>
+  filter(!is.na(score_bl),
+         if_any(matches("^score_[1-5]y$"),~!is.na(.x))) |>
+  select(inf,survt_yr,survt_day,censor_death,matches("score_[1-5]y$"),
+         censored_yr1,censored_yr2,censored_yr3,censored_yr4,censored_yr5) |> 
+  mutate(inf=if_else(inf==0,"no","yes")) |>
+  # Create ff-up variable at each point; active, Died, lastvisit_studyend
+  mutate(follow_up_yr1 = case_when(censored_yr1 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr1 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active"),
+         follow_up_yr2 = case_when(censored_yr2 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr2 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active"),
+         follow_up_yr3 = case_when(censored_yr3 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr3 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active"),
+         follow_up_yr4 = case_when(censored_yr4 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr4 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active"),
+         follow_up_yr5 = case_when(censored_yr5 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr5 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active")) |>
+  select(inf,survt_yr,
+         follow_up_yr1,score_1y,
+         follow_up_yr2,score_2y,
+         follow_up_yr3,score_3y,
+         follow_up_yr4,score_4y,
+         follow_up_yr5,score_5y) |> 
+  set_usriable_labels(survt_yr = "Follow-up time, years",
+                      follow_up_yr1="Follow-up (yr 1)",
+                      follow_up_yr2="Follow-up (yr 2)",
+                      follow_up_yr3="Follow-up (yr 3)",
+                      follow_up_yr4="Follow-up (yr 4)",
+                      follow_up_yr5="Follow-up (yr 5)") |>
+  tbl_summary(by="inf",
+              type=list(matches("score_..$") ~ "continuous2"),
+              statistic = list(all_continuous2()~ c("{mean} ({sd})")),
+              missing_text = "Missing",
+              digits = list(all_continuous() ~ 0,survt_yr ~ 1)) |>
+  bold_labels() |>
+  modify_footnote(everything() ~ NA) |>
+  modify_spanning_header(all_stat_cols() ~ "Severe infection after age 65 years") |>
+  modify_caption(glue("**Table 2.** VACS Index at follow-up (N = {nrow(inf_frailty_us|>filter(!is.na(score_bl),
+         if_any(c(score_1y,score_2y,score_3y,score_4y,score_5y),~!is.na(.x)))) |> prettyNum(',')})")) 
+
+table_two_main
+
+```
+
+
+## Regression models
+
+Create a function to fit models of conditional mean change in frailty at each year of follow-up (1, 2, 3, 4, and 5)
+
+Sequentially adjust for the ff confounder sets:
+
+ - **Minimally adjusted** : adjust for matching variables and baseline frailty score
+ - **Deprivation adjusted** : further adjust for:
+    - residence (urban vs Rural)
+    - area deprivation index (quntiles)
+ - **Lifestyle adjusted** : further adjust for:
+    - smoking
+    - aud or auditc_cat
+ - **underlying health adjusted** : further adjust for:
+  - 5 yr look back infections
+  - categories of CCI
+
+### Linear GEE regression function
+
+Create one function to fit the following models:
+
+- main models
+- stratified models
+- interaction models
+
+**Function arguments**:
+`outcome_usr`, `chr` = outcome variable.
+`cov_set`, `chr` = covariate set.
+`remove_usr,`, `chr` = to specify any variable that needs to be removed from an already specified covariate set.
+`interaction_usr`, `chr` = if not NULL, include interaction term with main exposure. Note: remove exposure and interaction_usr as individual covariates.
+`data`= `inf_frailty_us` is the default. For EM stratified models, to supply stratified data sets.
+
+```{r gee_model_function,eval=TRUE}
+#
+geelm <- function(outcome_usr,
+                  cov_set = c('matching','deprivation','lifestyle','underlying_health'),
+                  remove_usr=NULL,
+                  interaction_usr=NULL,
+                  data=inf_frailty_us) { 
+
+  # assert that remove_usr and interaction_usr are NULL and character vector
+  stopifnot(is.null(remove_usr) | is.character(remove_usr))
+  stopifnot(is.null(interaction_usr) | is.character(interaction_usr))
+
+  # define covariate sets 
+  # switch covariate set based on cov_set specification
+  
+  matching_score_bl <- c("inf","age_bl_cat4","sex","race5_sr","score_bl") 
+  deprivation <- c("urban","adi_cat")
+  lifestyle <- c("smoke","alcohol_use")
+  underlying_health <- c("inf_op_5y","cci_cat7")
+  
+  # sequential confounder adjustment with covariate sets
+  
+  cov_set <- match.arg(cov_set) # this makes the first option the default and will throw an error if none is selected
+  
+  covariates <- switch(cov_set,
+  "matching" = matching_score_bl, 
+  "deprivation" = c(matching_score_bl,deprivation),          
+  "lifestyle" = c(matching_score_bl,deprivation,lifestyle),         
+  "underlying_health" = c(matching_score_bl,deprivation,lifestyle,underlying_health),
+  stop("select a cov_set: one of c('matching','deprivation','lifestyle','underlying_health')"))
+  
+  # if remove_usr is supplied (i.e, not null) remove from covariate set
+  # else, leave as is 
+
+  if(!is.null(remove_usr) && !remove_usr %in% covariates) stop("Must select remove_usr variable from the covariate set")
+  
+  covariates <- 
+    if(!is.null(remove_usr)) covariates[-c(match(remove_usr,covariates))]  else {covariates} 
+      
+  # model data
+  # tidy data  
+
+  data <- data |> # manually remove missing observations: geeglm() does not automatically do that
+  filter(if_all(c(all_of(outcome_usr),all_of(covariates)),~!is.na(.x))) |>
+  select(c(matchnum,all_of(outcome_usr),all_of(covariates),any_of(interaction_usr))) |>
+  #remove empty factor levels:fct_drop removes empty factor levels: drops unused/empty levels not data
+  mutate(across(where(is.factor),fct_drop)) |>
+  mutate(across(matches("age|race|cci") & where(~any(summary(.x) < 5)),fct_lump_lowfreq)) |>
+  # if only one level of a factor remains after dropping or lumping, remove var 
+  mutate(across(where(~length(levels(.x)) == 1),~NULL))
+    
+  # model formula
+  # if interaction is false: normal model
+  # otherwise include interaction term and remove main exposure and interaction_usr as individual covariates from model
+  # note: the interaction_usrs are added by default thats why removing manually to avoid duplication
+  
+  covariates <- covariates[covariates %in% names(data)]
+
+  if(!is.null(interaction_usr) && !interaction_usr %in% names(data)) stop("Must choose interaction_usr from the dataset")
+
+  f <- if(is.null(interaction_usr))  {
+    as.formula(paste(outcome_usr,"~",c(glue_collapse(covariates,sep = "+"))))
+    } else 
+      
+  if(!is.null(interaction_usr)) {
+    as.formula(paste0(outcome_usr,"~","inf*",interaction_usr,"+",c(glue_collapse(
+      covariates[-Filter(function(x) !is.na(x),match(c("inf",interaction_usr),covariates))],
+                             sep = "+"))))
+    }
+
+  # Linear GEE model
+  # for cross-section model use gee(independence corstr) for robust standard errors (id = matchnum)
+    geeglm(f,
+         corstr = "independence",
+         family = gaussian(link = "identity"),
+         id=matchnum,
+         data = data)
+
+  }
+
+```
+
+### Fit main linear regression models 
+
+For each covariate set, fit yearly models and bundle model objects into a named list
+
+```{r}
+outcome_usriables <- c("score_1y","score_2y","score_3y","score_4y","score_5y")
+model_years <- c("Year 1","Year 2","Year 3","Year 4","Year 5")
+
+```
+
+```{r matching_models}
+matching_models <- setNames(map(outcome_usriables,~geelm(outcome = .x,cov_set="matching")),
+                           model_years)
+```
+
+```{r deprivation_models}
+deprivation_models <- setNames(map(outcome_usriables,~geelm(outcome = .x,cov_set="deprivation")),
+                           model_years)
+```
+
+```{r lifestyle_models}
+lifestyle_models <- setNames(map(outcome_usriables,~geelm(outcome = .x,cov_set="lifestyle")),
+                           model_years)
+```
+
+```{r underlying_health_models}
+underlying_health_models <- setNames(map(outcome_usriables,~geelm(outcome = .x,cov_set="underlying_health")),
+                           model_years)
+```
+
+### Forest plots
+
+```{r forest_plots}
+
+# data.frame one: extract model elements into a dataframe
+  df_models <- reduce(
+    map(underlying_health_models,~tidy(.x,conf.int = T)[2,c("estimate", "conf.low","conf.high")]),
+                      rbind) |>
+    mutate(est_label = paste0(formatC(estimate,format = "f",digits = 1),
+                              " (",formatC(conf.low,format = "f",digits = 1),", ",
+                              formatC(conf.high,format = "f",digits = 1),")")) |>
+    mutate("Time" = factor(names(underlying_health_models)),.before = 1) |>
+    mutate(est_labe_middotl=paste0(str_replace_all(est_label,"[.]","\U00B7"))) |>
+    add_row(Time = "Index date",.before = 1)
+
+# data.frame two: percentage censored
+  df_censor_death <- data.frame(Time = factor(c(sort(as.character(rep(df_models$Time,2))))),
+                            Exposure = rep(c("No Severe infection at index date","Severe infection at index date"),6),
+                            Censor_death = c(NA,NA,NA,NA,1.8,13,4.1,19,6.2,24,7.9,27)) |>
+    mutate(Censor_death_middot=str_replace(Censor_death,"[.]","\U00B7"))
+  
+# data.frame three: descriptive mean VACS Index
+  df_desc_means <- data.frame(Time = factor(c(sort(as.character(rep(df_models$Time,2))))),
+                              Exposure = rep(c("No Severe infection at index date","Severe infection at index date"),6),
+                              Mean = c(48,57,50,60,50,57,51,57,52,57,52,57))
+    
+  
+# Follow-up plot: censor death, censor from other causes are similar in both exposure groups
+  
+# descriptive plus annotation plot
+  fp_censor_death <- ggplot(df_censor_death,aes(Censor_death,Time,fill = factor(Exposure,levels = c("Severe infection at index date","No Severe infection at index date")))) + 
+    geom_col(position = "dodge",width=0.4) + 
+    geom_text(aes(x =Censor_death+3,label = if_else(!is.na(Censor_death),paste0(Censor_death,"%"),NA_character_)),
+              position = position_dodge(width = 0.5),size = 5,fontface = "bold") +
+    scale_x_continuous("Died (%)",breaks = seq(0,30,5),limits = c(0,35)) +
+    scale_y_discrete("",limits = rev) +
+     scale_fill_discrete(guide = guide_legend("",direction = "horizontal",ncol=2)) +
+       theme(text = element_text(face="bold",size=14),
+          panel.border = element_rect(fill = NA),
+          panel.grid.minor = element_blank(),
+          legend.background = element_blank(),
+          legend.position = "bottom",
+          axis.ticks = element_line(linewidth=2),
+          legend.text = element_text(size=14,face="bold"),
+           legend.title = element_text(size=20,face="bold"),
+          legend.key.size = unit(0.3, 'cm'),
+          axis.text= element_text(size=14,face="bold",hjust = -0.1,colour = "black"),
+          plot.margin = margin(20,15,10,30)) +
+    labs(title = "",subtitle = "") # t,r,b,l
+  
+  # descriptive plus annotation plot
+  fp_mean <- ggplot(df_desc_means,aes(Mean,Time,fill = factor(Exposure,levels = c("Severe infection at index date","No Severe infection at index date")))) + 
+    geom_col(position = "dodge",width=0.4) + 
+    geom_text(aes(x =Mean+3,label = Mean),size = 5,fontface = "bold",
+              position = position_dodge(width = 0.5)) +
+    scale_x_continuous("Mean VACS Index",breaks = seq(0,60,5),limits = c(0,65)) +
+    scale_y_discrete("",limits = rev,label=NULL) +
+    scale_fill_discrete(guide = guide_legend("",direction = "horizontal",ncol=2)) +
+    theme(text = element_text(face="bold",size=14),
+          axis.text= element_text(size=14,face="bold",hjust = -0.1,colour = "black"),
+          panel.border = element_rect(fill = NA),
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          legend.background = element_blank(),
+          axis.ticks = element_line(linewidth=2),
+          legend.text = element_text(size=14,face="bold"),
+          legend.title = element_text(size=20,face="bold"),
+          legend.key.size = unit(0.3, 'cm'),
+          plot.margin = margin(20,15,10,15)) +
+    labs(title = "Panel 1: US cohort",subtitle = "")
+
+      
+# regression plus annotation plot
+  fp_regression <- ggplot(df_models,aes(estimate,Time)) + 
+    geom_point(shape=18,size=7,colour="red") +
+    geom_linerange(aes(xmin=conf.low,xmax=conf.high),linewidth=1) +
+    geom_vline(xintercept = 0,linetype="dashed",colour="blue",linewidth=2) +
+    geom_text(aes(x=3,label=est_label),
+              fontface= "bold",size = 7) +
+    scale_y_discrete(name=NULL,label=NULL,limits=rev) + 
+    scale_x_continuous("Conditional mean difference in VACS Index (95% CI)",limits = c(0,3.5)) +
+     theme(text = element_text(face="bold",size=14),
+          axis.text= element_text(size=14,face="bold",hjust = -0.1,colour = "black"),
+          panel.border = element_rect(fill = NA),
+          panel.grid.minor = element_blank(),
+          axis.ticks = element_line(linewidth=2),
+          plot.margin = margin(20,10,10,30)) +
+    labs(title = "",subtitle = "")
+    
+  # combine plots
+  Figure_1 <- ggarrange(fp_censor_death,fp_mean,fp_regression,
+                        allign="h",nrow=1,
+                        labels=c("              A.","B.","C."),
+                        label.y = 0.93,
+                        common.legend = T,
+                        legend = "top")
+```
+
+
+### Tidy regression outputs
+```{r merge_stack_model_tables_by_year,eval=TRUE}
+
+# Create a function to merge model-tables by year: put yearly models for each covariate set into one row, in order of time
+
+merge_tables_by_year <- function(models,model_name,
+                                 label = "Models: sequential adjustment sets",
+                                 model_years = c("Year 1", "Year 2", "Year 3", "Year 4", "Year 5")){
+  stopifnot(is.list(models)) # assert models are supplied as a list
+  
+  #
+  tbl_merge( # to stack/append the tables
+    map(models, 
+        ~tbl_regression(.x,include="inf",
+                label = list("inf" ~ model_name),
+                estimate_fun = ~round(.x,1)) |>
+          modify_table_body(
+            ~ .x |>
+              mutate(estimate_2 = paste0(round(estimate,1)," (",ci,")")) |>
+              relocate(c(n_obs,estimate_2),.before = estimate) |>
+              select(-c(p.value,estimate,ci,conf.high,conf.low))) |>
+          modify_header(estimate_2 = "**`Beta (95% CI)`**",N_obs="**N**",label=label)),
+    tab_spanner  = model_years)
+}
+
+```
+
+# Sensitivity analyses 
+
+## Sensitivity analyses 1: Redo analyses including Individuals with imputed baseline VACS Index and at least one follow-up VACS
+### Descriptive analysis: sensitivity analysis
+
+```{r table_s1}
+table_s1 <- inf_frailty_us |>
+  filter(if_any(matches("^score_[1-5]y$"),~!is.na(.x))) |>
+    mutate(inf=if_else(inf==0,"no","yes"),
+         charl_diab = if_else(charl_diab_c == 1 | charl_diab_nc ==1, 1,0),
+         across(where(is.factor),~fct_na_uslue_to_level(.x,"Missing"))) |>
+  mutate(charl_diab_c=NULL,charl_diab_nc=NULL) |>
+  select(inf,age_bl,age_bl_cat4,sex,race5_sr,urban,
+         adi_cat,alcohol_use,smoke,cci_cat4,matches("charl_"),
+         inf_op_5y,score_bl) |> 
+  tbl_summary(by="inf",missing_text = "Missing",
+              type=list(c(score_bl) ~ "continuous2"),
+              statistic = list(all_continuous2()~ c("{mean} ({sd})")),
+              digits = list(all_continuous() ~ 0)) |>
+  bold_labels() |>
+  modify_footnote(everything() ~ NA) |>
+  modify_spanning_header(all_stat_cols() ~ "Severe infection after age 65 years") |>
+  modify_caption(glue("**Table S1.** Characteristics of participants at baseline (N = {nrow(inf_frailty_us|>filter(if_any(c(score_1y,score_2y,score_3y,score_4y,score_5y),~!is.na(.x)))) |> prettyNum(',')})")) 
+
+table_s1
+```
+
+```{r table_s2}
+# follow-up frailty score by exposure status
+table_s2 <- inf_frailty_us |>
+  filter(if_any(matches("^score_[1-5]y$"),~!is.na(.x))) |>
+  select(inf,survt_yr,survt_day,censor_death,matches("score_[1-5]y$"),
+         censored_yr1,censored_yr2,censored_yr3,censored_yr4,censored_yr5) |> 
+  mutate(inf=if_else(inf==0,"no","yes")) |>
+  # Create ff-up variable at each point; active, Died, lastvisit_studyend
+  mutate(follow_up_yr1 = case_when(censored_yr1 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr1 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active"),
+         follow_up_yr2 = case_when(censored_yr2 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr2 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active"),
+         follow_up_yr3 = case_when(censored_yr3 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr3 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active"),
+         follow_up_yr4 = case_when(censored_yr4 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr4 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active"),
+         follow_up_yr5 = case_when(censored_yr5 == 1 & censor_death == 1 ~ "Died",
+                                   censored_yr5 == 1 & censor_death == 0 ~ "LastVAvisit_studyend",
+                                   .default = "Active")) |>
+  select(inf,survt_yr,
+         follow_up_yr1,score_1y,
+         follow_up_yr2,score_2y,
+         follow_up_yr3,score_3y,
+         follow_up_yr4,score_4y,
+         follow_up_yr5,score_5y) |> 
+  set_usriable_labels(survt_yr = "Follow-up time, years",
+                      follow_up_yr1="Follow-up (yr 1)",
+                      follow_up_yr2="Follow-up (yr 2)",
+                      follow_up_yr3="Follow-up (yr 3)",
+                      follow_up_yr4="Follow-up (yr 4)",
+                      follow_up_yr5="Follow-up (yr 5)") |>
+  tbl_summary(by="inf",
+              type=list(matches("score_..$") ~ "continuous2"),
+              statistic = list(all_continuous2()~ c("{mean} ({sd})")),
+              missing_text = "Missing",
+              digits = list(all_continuous() ~ 0,survt_yr ~ 1)) |>
+  bold_labels() |>
+  modify_footnote(everything() ~ NA) |>
+  modify_spanning_header(all_stat_cols() ~ "Severe infection after age 65 years") |>
+  modify_caption(glue("**Table S2.** Frailty (VACS Index) during follow-up (N = {nrow(inf_frailty_us|>filter(if_any(c(score_1y,score_2y,score_3y,score_4y,score_5y),~!is.na(.x)))) |> prettyNum(',')})")) 
+
+table_s2
+```
+
+### Fully adjusted models with imputed (Multiple Imputation Approach) baseline VACS Index
+
+```{r geelm_mi_function}
+geelm_mi <- function(outcome_usr) {  
+  outcome_usrs <- c("score_1y","score_2y","score_3y","score_4y","score_5y")
+  covariates <- c("inf","score_bl","age_bl_cat4","sex","race5_sr","urban","adi_cat","smoke","alcohol_use","inf_op_5y","cci_cat7") 
+
+#'
+data <- inf_frailty_us |> 
+    filter(if_all(c(all_of(outcome_usr),all_of(covariates[-match("score_bl",covariates)])),~!is.na(.x))) |>
+    select(c(matchnum,score_bl,all_of(outcome_usr),all_of(covariates))) |>
+    mutate(across(where(is.factor),fct_drop)) |>
+    mutate(across(matches("age|race|cci") & where(~any(summary(.x) < 5)),fct_lump_lowfreq))
+  
+
+#' which cells to impute
+where_impute <-  imodify(data,~ is.na(.x) & .y %in% "score_bl") |> as.matrix()
+  
+#' Impute missing score_bl
+imputed_data <- mice(data,m=5,where = where_impute,defaultMethod = "pmm",seed = 12345)
+  
+#' Regression with imputed data
+
+mi_model <- with(imputed_data,
+                 geeglm(get(outcome_usr) ~ inf + score_bl + age_bl_cat4 + sex + race5_sr + urban + adi_cat + smoke + alcohol_use + inf_op_5y + cci_cat7,
+                         corstr = "independence", 
+                         family = gaussian(link = "identity"),
+                         id=matchnum))
+
+#' Pool results
+mi_model_estimates <- pool(mi_model)
+
+mi_model_estimates$pooled |> 
+  filter(term == "inf") |>
+  transmute(N=pool(mi_model)$glanced$nobs[1],`estimate (Cond Mean diff)`=round(estimate,2),
+            `95% CI` = paste0(round(estimate-sqrt(t)*1.96,2),", ",round(estimate+sqrt(t)*1.96,2)))
+}
+
+```
+
+```{r fit_mi_models}
+
+#'
+mi_year_1 <- geelm_mi("score_1y")
+mi_year_2 <- geelm_mi("score_2y")
+mi_year_3 <- geelm_mi("score_3y")
+mi_year_4 <- geelm_mi("score_4y")
+mi_year_5 <- geelm_mi("score_5y")
+#'
+mi_all_years <- reduce(list(mi_year_1,mi_year_2,mi_year_3,mi_year_4,mi_year_5),rbind) |>
+  mutate(Year = c("Year 1","Year 2","Year 3","Year 4","Year 5"),.before=N)
+#'
+gt(mi_all_years,caption = "Fully adjusted conditional mean change in VACS Index: Mutiple Imputed baseline VACS Index")
+```
+
+## Sensitivity analyses 2: Community acquired infections: redefine severe infections as:
+
+ 1. At least one outpatient infection diagnostic code on the date of hospital admission or within 7 days prior
+ 2. Any dispensed antimicrobial on the date of hospital admission or within 7 days prior
+ 3. Both 1 and 2
+
+```{r community_acquired_infections_exposure}
+# approach 1
+inf_frailty_us |>
+  group_by(matchnum) |>
+  filter(any(inf_op_7d_1op ==1)) |>
+  arrange(inf,.by_group = T) |>
+  ungroup() 
+
+# Fit the fully adjusted regression model on the above data for each comm-acquired inf definition
+s1a_comm_inf_1 <- setNames(map(outcome_usriables,
+                                             ~geelm(outcome = .x,cov_set="underlying_health",
+                                                    data = inf_frailty_us |>
+                                                      group_by(matchnum) |>
+                                                      filter(any(inf_op_7d_1op ==1)) |>ungroup())),
+                             model_years)
+#
+s1b_comm_inf_1 <- setNames(map(outcome_usriables,
+                                             ~geelm(outcome = .x,cov_set="underlying_health",
+                                                    data = inf_frailty_us |>
+                                                      group_by(matchnum) |>
+                                                      filter(any(antimic ==1)) |>
+                                                      ungroup())),model_years)
+
+#
+s1c_comm_inf_1 <- setNames(map(outcome_usriables,
+                                             ~geelm(outcome = .x,cov_set="underlying_health",
+                                                    data = inf_frailty_us |>
+                                                      group_by(matchnum) |>
+                                                      filter(any(inf==1 & inf_op_7d_1op==1 & antimic ==1)) |>
+                                                      ungroup())),model_years)
+
+# Combine tables
+
+# approach 1: to go with this
+tbl_stack(list(merge_tables_by_year(s1a_comm_inf_1,"1. Outpatient diagnoses",label = ""),
+               merge_tables_by_year(s1b_comm_inf_1,"2. Dispensed antimicrobial",label = ""),
+               merge_tables_by_year(s1c_comm_inf_1,"3. Both 1. and 2.",label = ""))) |>
+  modify_caption("Sensitivity analyses: Community-acquired infections")
+```
+
+## Secondary analyses: Effect modification (EM) models
+
+Fit models to explore effect modification by:
+
+- Age group
+- deprivation
+- diabetes
+- dementia
+- CCI categories
+- Severe infection (exposure) type (bacterial, viral, fungal, parasitic)
+- Severe infection (exposure) site (sepsis,ssti,menigitis,gastro,lrti)
+
+Approach:
+
+- Fit stratified regression models, thus for each level of EM variable
+- Conduct interaction test to determine difference in estimates by level of EM variable. Linear hypothesis F test. `car package`
+
+### Fit EM models and conduct interaction tests
+
+For each EM var:
+
+  - Create a stratified data set for each level
+  - Fit the regression models (Years 1 to 5) for each stratified data set
+  - Bundle the stratified models for each EM variable into a named list
+
+```{r nest_data_by_interaction_usr,eval=TRUE}
+
+# function to stratify data and bundle into a list: could create a list column with nest_by() but too slow
+
+stratify_df <- function(interaction_usr,
+                        outcome_usriables = c("score_1y", "score_2y" ,"score_3y", "score_4y", "score_5y"),
+                        model_years =  c("Year 1", "Year 2", "Year 3", "Year 4", "Year 5"),
+                        data=inf_frailty_us){
+
+  # create sub-cohorts of the em variable
+  # for each sub-cohort of em variable, there will be 5 models (one for each ff-up year)
+  # to use map2(), will need a .x= data and .y=outcome combination 
+  # the number of combinations equals num_levels_interaction_usr * num_outcome_usrs which is 5
+
+  levels_interaction_usr <- data |> pull({{interaction_usr}}) |>  factor() |> levels()
+  list_data <- map(levels_interaction_usr, ~filter(data,{{interaction_usr}} == .x))
+  list_data <- rep(list_data,length(outcome_usriables)) # replicate the data 5 times
+  # name the models by Year and level, but sorted in Years so Y1 (levels), Y2 (levels)
+  em_model_names <- unlist(map(model_years,~paste0(.x,":",as_label(enquo(interaction_usr))," ",levels_interaction_usr))) 
+  list_data <- setNames(list_data,em_model_names)
+}
+```
+
+### Fit stratified EM models: fully adjusted model
+
+```{r em_stratified_models}
+
+outcome_usriables <- c("score_1y", "score_2y" ,"score_3y", "score_4y", "score_5y")
+# note: must sort outcome_usriables in years any time it is replicated to match the order of the stratified data sets 
+
+# age
+
+em_models_age <- map2(.x=stratify_df(age_bl_cat4),.y=sort(rep(outcome_usriables,4)),
+     .f = ~geelm(.y,cov_set = "underlying_health",remove_usr = "age_bl_cat4",data = .x)) # 4 is the number of levels of interaction_usr
+ 
+
+# deprivation
+
+em_models_deprivation <- map2(.x=stratify_df(adi_cat),.y=sort(rep(outcome_usriables,5)),
+     .f = ~geelm(.y,cov_set = "underlying_health",remove_usr = "adi_cat",data = .x)) # 4 is the number of levels of interaction_usr
+ 
+
+# dementia
+em_models_dem <- map2(.x=stratify_df(charl_dem),.y=sort(rep(outcome_usriables,2)), 
+     .f = ~geelm(.y,cov_set = "underlying_health",data = .x))
+
+# diabetes   
+
+inf_frailty_us <- inf_frailty_us |>
+  mutate(charl_diab = if_else(charl_diab_c == 1 | charl_diab_nc ==1, 1,0))
+
+em_models_diab <- map2(.x=stratify_df(charl_diab),.y=sort(rep(outcome_usriables,2)), 
+     .f = ~geelm(.y,cov_set = "underlying_health",data = .x))
+
+# cci
+em_models_cci <-  map2(.x=stratify_df(cci_cat4),.y=sort(rep(outcome_usriables,4)), 
+     .f = ~geelm(.y,cov_set = "underlying_health",remove_usr = "cci_cat7",data = .x))
+
+# type of severe infection of the exposed individual
+
+em_models_inf_type <-  map2(.x=stratify_df(inf_type_of_match_grp),.y=sort(rep(outcome_usriables,4)),
+    .f = ~geelm(.y,cov_set = "underlying_health",data = .x))
+
+# site of severe infection of the exposed individual
+
+em_models_inf_site <-  map2(.x=stratify_df(inf_site_of_match_grp),.y=sort(rep(outcome_usriables,6)),
+    .f = ~geelm(.y,cov_set = "underlying_health",data = .x))
+```
+
+```{r merge_stack_em_model_tables_by_year_function,eval=TRUE}
+
+# merge yearly em models (for each em var): each year-model summary as a column
+# each model(level of em var) as a row
+
+merge_stack_em_tables_by_year <- function(models,levels_interaction_usr,label=label){
+  stopifnot(is.list(models)) # assert models are supplied as a list
+
+# group models by level of em var
+  model_names <- paste0(levels_interaction_usr)
+  models <- map(levels_interaction_usr, ~models[str_detect(names(models),paste0("Year.*[:].*",.x))]) 
+  models <- setNames(models,model_names)
+
+  #
+  tbls <- imap(models,~merge_tables_by_year(.x,model_name = .y,label = label))
+  #
+  tbl_stack(tbls)
+  
+}
+
+```
+
+### Regression table results
+
+```{r table_3: em_tables,eval=TRUE}
+
+merge_stack_em_tables_by_year(em_models_age,c("65-70","71-80","81-90",">90"),"Effect modification: Age")
+
+merge_stack_em_tables_by_year(em_models_deprivation,c("First","Second","Third","Fourth","Fifth"),"Effect modification: Deprivation")
+
+merge_stack_em_tables_by_year(em_models_dem,c("0","1"),"Effect modification: DEMENTIA")
+
+merge_stack_em_tables_by_year(em_models_diab,c("0","1"),"Effect modification: DIABETES")
+
+merge_stack_em_tables_by_year(em_models_cci,c("0","1","2","3+"),"Effect modification: CCI")
+
+merge_stack_em_tables_by_year(em_models_inf_type,c("bacterial","viral","fungal","parasitic"),
+                              "Effect modification: Infection type of exposed individual")
+
+merge_stack_em_tables_by_year(em_models_inf_site,c("sepsis","uti","ssti","mening_enceph", "lrti","gastro"),
+                              "Effect modification: Infection site of exposed individual")
+```
+
+### Ineraction p values
+
+```{r interaction_p_linearhypothesis,eval=TRUE}
+# create function to get interaction p.value from anova test
+
+p_uslue_interaction <- function(interaction_model) {
+  
+  interaction_terms <- matchCoefs(interaction_model,":") # pull the vector of interaction coefficients from the model
+  n_coefs <- length(interaction_terms) # number of interaction coefficients in the model
+  
+  # if n_coefs == 1, the null hypothesis is coef == 0 # this pvalue is basically same as pvalue from model (with wald test)
+  if(n_coefs ==1) {
+    linearHypothesis(interaction_model,interaction_terms,test="F")$`Pr(>F)`[2] |>
+      formatC(format = "f",digits=4) 
+    
+  # if n_coefs > 1, the null hypothesis is that the coefs are equal to each other so,
+  # so for 3 coefs, null = coef1 = coef2, coef1=coef3, and coef2=coef3 is implied
+    
+    } else
+      
+    if(n_coefs > 1) { # n coefs need n-1 character vector of the hypothesis
+      linearHypothesis(interaction_model,
+                       paste0(interaction_terms[1],
+                              "=",
+                              interaction_terms[-1]),
+                       test="F")$`Pr(>F)`[2] |>
+        formatC(format = "f",digits=4) 
+    
+    }
+}
+
+```
+
+```{r interaction_p.values}
+
+# age
+
+em_pval_age <- setNames(
+  map(outcome_usriables,~geelm(outcome = .x,cov_set="underlying_health",interaction_usr = "age_bl_cat4")),
+                           model_years) |> 
+  map_chr(p_uslue_interaction) 
+
+# dementia
+em_pval_dem <- setNames(
+  map(outcome_usriables,
+      ~geelm(outcome = .x,cov_set="underlying_health",interaction_usr = "charl_dem")),
+                           model_years) |> map_chr(p_uslue_interaction)
+
+# diabetes complicated 
+em_pval_diab <- setNames(
+  map(outcome_usriables,
+      ~geelm(outcome = .x,cov_set="underlying_health",interaction_usr = "charl_diab")),
+                           model_years) |> map_chr(p_uslue_interaction)
+
+# cci
+em_pval_cci <- setNames(
+  map(outcome_usriables,
+      ~geelm(outcome = .x,cov_set="underlying_health",interaction_usr = "cci_cat7")),
+                           model_years) |> map_chr(p_uslue_interaction)
+
+# type of severe infection 
+em_pval_inf_type <- setNames(
+  map(outcome_usriables,~geelm(outcome = .x,cov_set="underlying_health",
+                               interaction_usr = "inf_type_of_match_grp",
+                               data = inf_frailty_us|> filter(!is.na(inf_type_of_match_grp)))),
+
+                             model_years) |> map_chr(p_uslue_interaction)
+
+# site of severe infection 
+em_pval_inf_site <- setNames(
+  map(outcome_usriables,~geelm(outcome = .x,cov_set="underlying_health",
+                               interaction_usr = "inf_site_of_match_grp",
+                               data = inf_frailty_us|> filter(!is.na(inf_site_of_match_grp)))),
+                             model_years) |> map_chr(p_uslue_interaction)
+# combine p values
+em_pvalues <- bind_rows(em_pval_age,em_pval_dem,em_pval_diab,
+                        em_pval_cci,em_pval_inf_type,em_pval_inf_site) |>
+  tibble() |>
+  mutate(variable = c("Age","Dementia","Diabetes","CCI","Type of severe infection","Site of severe infection"),.before=1)
+
+```
+
+
+
+
+
+
+
+
